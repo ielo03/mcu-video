@@ -51,6 +51,7 @@ pico_enable_stdio_usb(mcu-video 1)
 target_link_libraries(mcu-video
         pico_stdlib
         hardware_spi
+        pico_multicore
 )
 
 # Add the standard include files to the build
