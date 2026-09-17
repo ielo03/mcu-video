@@ -8,3 +8,5 @@
 #define PIN_BL   22
 
 #define SPI_MHZ 20
+
+#define BUFF_SIZE 76800

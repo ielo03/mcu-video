@@ -22,3 +22,14 @@ This project is a challenge to reach the highest fps I can with the following ha
 - **Display Controller:** ST7796S
 - **Refresh Rate:** Up to 60 Hz
 - **Framebuffer Storage:** On-display GRAM (Supports writing to regions not just the full screen)
+
+## Benchmarks
+
+### Before DMA: quarter-screen transfers
+
+Using blocking SPI writes with four 76,800-byte strips per 320 × 480 RGB565 frame:
+
+- **Average strip send time:** 46.729 ms across five samples.
+- **Estimated full-frame send time:** 186.916 ms (four strips).
+- **Estimated throughput:** 5.35 FPS, excluding display-command and logging overhead.
+- **Buffer fill time:** Approximately 0.81 ms per strip on the other core; sending was the bottleneck.

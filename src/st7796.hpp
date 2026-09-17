@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <initializer_list>
 
 enum class ST7796Command : std::uint8_t {
@@ -26,6 +27,12 @@ enum class ST7796Command : std::uint8_t {
 };
 
 void send_command(ST7796Command cmd);
+void send_data(const std::uint8_t* data, std::size_t size);
 void send_data(std::initializer_list<std::uint8_t> data);
+
+template <std::size_t N>
+void send_data(const std::uint8_t (&data)[N]) {
+    send_data(data, N);
+}
 
 void init_display();

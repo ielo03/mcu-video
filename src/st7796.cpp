@@ -17,10 +17,14 @@ void send_command(ST7796Command cmd) {
 }
 
 void send_data(std::initializer_list<std::uint8_t> data) {
+    send_data(data.begin(), data.size());
+}
+
+void send_data(const std::uint8_t* data, std::size_t size) {
     gpio_put(PIN_DC, 1);
     gpio_put(PIN_CS, 0);
 
-    spi_write_blocking(LCD_SPI, data.begin(), data.size());
+    spi_write_blocking(LCD_SPI, data, size);
 
     gpio_put(PIN_CS, 1);
 }
