@@ -1,12 +1,16 @@
 #include "pico/stdlib.h"
 #include "hardware/spi.h"
 #include "pico/multicore.h"
+#include "hardware/dma.h"
 
 #include <atomic>
 #include <cstdio>
 
 #include "st7796.hpp"
 #include "config.hpp"
+
+int spi_dma_channel;
+dma_channel_config spi_dma_config;
 
 uint8_t a_buff[BUFF_SIZE];
 uint8_t b_buff[BUFF_SIZE];
@@ -44,6 +48,41 @@ void init_gpio() {
     gpio_set_dir(PIN_BL, GPIO_OUT);
 
     gpio_put(PIN_BL, 1);
+}
+
+void init_dma() {
+    spi_dma_channel = dma_claim_unused_channel(true);
+    spi_dma_config = dma_channel_get_default_config(spi_dma_channel);
+
+    channel_config_set_transfer_data_size(&spi_dma_config, DMA_SIZE_8);
+    channel_config_set_read_increment(&spi_dma_config, true);
+    channel_config_set_write_increment(&spi_dma_config, false);
+    channel_config_set_dreq(&spi_dma_config, spi_get_dreq(LCD_SPI, true));
+}
+
+void send_pixels_dma(const uint8_t* buffer, size_t bytes) {
+    dma_channel_configure(
+        spi_dma_channel,
+        &spi_dma_config,
+        &spi_get_hw(LCD_SPI)->dr,
+        buffer,
+        bytes,
+        true
+    );
+
+    dma_channel_wait_for_finish_blocking(spi_dma_channel);
+
+    // DMA has finished feeding SPI; wait for the last bits to leave.
+    while (spi_is_busy(LCD_SPI)) {
+        tight_loop_contents();
+    }
+
+    // Discard received bytes and clear receive overrun, as the
+    // SDK's write-only SPI function does.
+    while (spi_is_readable(LCD_SPI)) {
+        (void)spi_get_hw(LCD_SPI)->dr;
+    }
+    spi_get_hw(LCD_SPI)->icr = SPI_SSPICR_RORIC_BITS;
 }
 
 void core1_main() {
@@ -91,8 +130,13 @@ int main() {
 
     init_gpio();
 
+    init_dma();
+
     init_display();
 
+    // Measure all steady-state core 0 time outside the pixel-send call.
+    // Each interval includes the previous log and the next command setup.
+    uint64_t other_start = time_us_64();
     uint8_t div_num = 0;
     while (true) {
         // Full-screen window for ROTATION 0: columns 0..319, rows 0..479.
@@ -106,31 +150,41 @@ int main() {
         gpio_put(PIN_DC, 1);
         gpio_put(PIN_CS, 0);
 
+        std::printf("SPI clock: %u Hz\n", spi_get_baudrate(LCD_SPI));
+
         if (!a_buff_written) {
             const uint32_t fill_us = a_fill_us;
-            const uint32_t send_start = time_us_32();
-            spi_write_blocking(LCD_SPI, a_buff, BUFF_SIZE);
-            const uint32_t send_us = time_us_32() - send_start;
+            const uint64_t send_start = time_us_64();
+            const uint64_t other_us = send_start - other_start;
+            send_pixels_dma(a_buff, BUFF_SIZE);
+            const uint64_t send_end = time_us_64();
+            const uint64_t send_us = send_end - send_start;
+            other_start = send_end;
             a_buff_written = true;
             gpio_put(PIN_CS, 1);
-            std::printf("buffer A strip %u: fill=%lu us send=%lu us bytes=%u\n",
+            std::printf("buffer A strip %u: fill=%lu us core0_send=%llu us core0_other=%llu us bytes=%u\n",
                         static_cast<unsigned>(div_num),
                         static_cast<unsigned long>(fill_us),
-                        static_cast<unsigned long>(send_us),
+                        static_cast<unsigned long long>(send_us),
+                        static_cast<unsigned long long>(other_us),
                         static_cast<unsigned>(BUFF_SIZE));
             ++div_num;
             if (div_num == 4) div_num = 0;
         } else if (!b_buff_written) {
             const uint32_t fill_us = b_fill_us;
-            const uint32_t send_start = time_us_32();
-            spi_write_blocking(LCD_SPI, b_buff, BUFF_SIZE);
-            const uint32_t send_us = time_us_32() - send_start;
+            const uint64_t send_start = time_us_64();
+            const uint64_t other_us = send_start - other_start;
+            send_pixels_dma(b_buff, BUFF_SIZE);
+            const uint64_t send_end = time_us_64();
+            const uint64_t send_us = send_end - send_start;
+            other_start = send_end;
             b_buff_written = true;
             gpio_put(PIN_CS, 1);
-            std::printf("buffer B strip %u: fill=%lu us send=%lu us bytes=%u\n",
+            std::printf("buffer B strip %u: fill=%lu us core0_send=%llu us core0_other=%llu us bytes=%u\n",
                         static_cast<unsigned>(div_num),
                         static_cast<unsigned long>(fill_us),
-                        static_cast<unsigned long>(send_us),
+                        static_cast<unsigned long long>(send_us),
+                        static_cast<unsigned long long>(other_us),
                         static_cast<unsigned>(BUFF_SIZE));
             ++div_num;
             if (div_num == 4) div_num = 0;
