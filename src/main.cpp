@@ -21,18 +21,14 @@ std::atomic<bool> b_buff_written{true};
 uint32_t a_fill_us = 0;
 uint32_t b_fill_us = 0;
 
-const uint8_t raset[4][4] = {
-    {0x00, 0x00, 0x00, 0x77}, // Top: rows 0–119
-    {0x00, 0x78, 0x00, 0xEF}, // Top middle: rows 120–239
-    {0x00, 0xF0, 0x01, 0x67}, // Bottom middle: rows 240–359
-    {0x01, 0x68, 0x01, 0xDF}, // Bottom: rows 360–479
-};
+uint32_t buff_not_ready_count = 0;
 
 void init_gpio() {
     spi_init(LCD_SPI, SPI_MHZ * 1000 * 1000);
 
     gpio_set_function(PIN_SCK, GPIO_FUNC_SPI);
     gpio_set_function(PIN_MOSI, GPIO_FUNC_SPI);
+    gpio_set_function(PIN_MISO, GPIO_FUNC_SPI);
 
     gpio_init(PIN_CS);
     gpio_set_dir(PIN_CS, GPIO_OUT);
@@ -61,6 +57,7 @@ void init_dma() {
 }
 
 void send_pixels_dma(const uint8_t* buffer, size_t bytes) {
+    ensure_write_baud();
     dma_channel_configure(
         spi_dma_channel,
         &spi_dma_config,
@@ -138,62 +135,81 @@ int main() {
     // Each interval includes the previous log and the next command setup.
     uint64_t other_start = time_us_64();
     uint8_t div_num = 0;
-    while (true) {
-        // Full-screen window for ROTATION 0: columns 0..319, rows 0..479.
-        send_command(ST7796Command::CASET);
-        send_data({0x00, 0x00, 0x01, 0x3F});
 
-        send_command(ST7796Command::RASET);
-        send_data(raset[div_num]);
+    send_command(ST7796Command::CASET);
+    send_data({0x00, 0x00, 0x01, 0x3F});
+
+    send_command(ST7796Command::RASET);
+    send_data({0x00, 0x00, 0x01, 0xDF});
+
+    send_command(ST7796Command::RAMWR);
+    gpio_put(PIN_DC, 1);
+    gpio_put(PIN_CS, 0);
+
+    uint64_t previous_wait_start = 0;
+    bool have_previous_wait = false;
+    while (true) {
+        const uint64_t wait_start = time_us_64();
+        const bool frame_interval_valid = have_previous_wait;
+        const uint64_t frame_interval_us = frame_interval_valid
+            ? wait_start - previous_wait_start : 0;
+        previous_wait_start = wait_start;
+        have_previous_wait = true;
+        wait_for_blanking_with_gap(222); // read-baud swap 117-124us
+        const uint64_t after_wait_us = time_us_64();
+        const uint64_t wait_us = after_wait_us - wait_start;
+        reset_write_baud(); // write-baud swap 81-82us
 
         send_command(ST7796Command::RAMWR);
         gpio_put(PIN_DC, 1);
         gpio_put(PIN_CS, 0);
 
-        std::printf("SPI clock: %u Hz\n", spi_get_baudrate(LCD_SPI));
-
-        if (!a_buff_written) {
-            const uint32_t fill_us = a_fill_us;
-            const uint64_t send_start = time_us_64();
-            const uint64_t other_us = send_start - other_start;
-            send_pixels_dma(a_buff, BUFF_SIZE);
-            const uint64_t send_end = time_us_64();
-            const uint64_t send_us = send_end - send_start;
-            other_start = send_end;
-            a_buff_written = true;
-            gpio_put(PIN_CS, 1);
-            std::printf("buffer A strip %u: fill=%lu us core0_send=%llu us core0_other=%llu us bytes=%u\n",
-                        static_cast<unsigned>(div_num),
-                        static_cast<unsigned long>(fill_us),
-                        static_cast<unsigned long long>(send_us),
-                        static_cast<unsigned long long>(other_us),
-                        static_cast<unsigned>(BUFF_SIZE));
-            ++div_num;
-            if (div_num == 4) div_num = 0;
-        } else if (!b_buff_written) {
-            const uint32_t fill_us = b_fill_us;
-            const uint64_t send_start = time_us_64();
-            const uint64_t other_us = send_start - other_start;
-            send_pixels_dma(b_buff, BUFF_SIZE);
-            const uint64_t send_end = time_us_64();
-            const uint64_t send_us = send_end - send_start;
-            other_start = send_end;
-            b_buff_written = true;
-            gpio_put(PIN_CS, 1);
-            std::printf("buffer B strip %u: fill=%lu us core0_send=%llu us core0_other=%llu us bytes=%u\n",
-                        static_cast<unsigned>(div_num),
-                        static_cast<unsigned long>(fill_us),
-                        static_cast<unsigned long long>(send_us),
-                        static_cast<unsigned long long>(other_us),
-                        static_cast<unsigned>(BUFF_SIZE));
-            ++div_num;
-            if (div_num == 4) div_num = 0;
+        for (int o = 0; o < 4; o++) {
+            if (!a_buff_written) {
+                const uint32_t fill_us = a_fill_us;
+                const uint64_t send_start = time_us_64();
+                const uint64_t other_us = send_start - other_start;
+                send_pixels_dma(a_buff, BUFF_SIZE);
+                const uint64_t send_end = time_us_64();
+                const uint64_t send_us = send_end - send_start;
+                other_start = send_end;
+                a_buff_written = true;
+//                 std::printf("buffer A strip %u: fill=%lu us core0_send=%llu us core0_other=%llu us bytes=%u\n",
+//                             static_cast<unsigned>(div_num),
+//                             static_cast<unsigned long>(fill_us),
+//                             static_cast<unsigned long long>(send_us),
+//                             static_cast<unsigned long long>(other_us),
+//                             static_cast<unsigned>(BUFF_SIZE));
+                ++div_num;
+                if (div_num == 4) div_num = 0;
+            } else if (!b_buff_written) {
+                const uint32_t fill_us = b_fill_us;
+                const uint64_t send_start = time_us_64();
+                const uint64_t other_us = send_start - other_start;
+                send_pixels_dma(b_buff, BUFF_SIZE);
+                const uint64_t send_end = time_us_64();
+                const uint64_t send_us = send_end - send_start;
+                other_start = send_end;
+                b_buff_written = true;
+//                 std::printf("buffer B strip %u: fill=%lu us core0_send=%llu us core0_other=%llu us bytes=%u\n",
+//                             static_cast<unsigned>(div_num),
+//                             static_cast<unsigned long>(fill_us),
+//                             static_cast<unsigned long long>(send_us),
+//                             static_cast<unsigned long long>(other_us),
+//                             static_cast<unsigned>(BUFF_SIZE));
+                ++div_num;
+                if (div_num == 4) div_num = 0;
+            } else {
+                std::printf("ERROR: buff not ready - %u\n", buff_not_ready_count);
+                ++buff_not_ready_count;
+            }
         }
+        // Optional loop/wait timing; enable alongside the per-buffer logs.
+        // if (frame_interval_valid) {
+        //     std::printf("wait-start interval: %llu us; wait_for_blanking: %llu us\n",
+        //                 static_cast<unsigned long long>(frame_interval_us),
+        //                 static_cast<unsigned long long>(wait_us));
+        // }
     }
 
-    gpio_put(PIN_CS, 1);
-
-    while (true) {
-        tight_loop_contents();
-    }
 }

@@ -2,11 +2,13 @@
 
 #define PIN_SCK  18
 #define PIN_MOSI 19
+#define PIN_MISO 16
 #define PIN_CS   17
 #define PIN_DC   20
 #define PIN_RST  21
 #define PIN_BL   22
 
 #define SPI_MHZ 80
+#define SPI_READ_MHZ 10
 
 #define BUFF_SIZE 76800

@@ -1,2 +1,13 @@
 build
 !.vscode/*
+
+# macOS metadata
+.DS_Store
+
+# Local serial captures and scratch diagnostics
+/screenlog.*
+/hardcopy.*
+/debug.md
+/debug.txt
+/logs.txt
+/scanline_timing_log.txt

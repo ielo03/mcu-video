@@ -6,6 +6,7 @@
 
 enum class ST7796Command : std::uint8_t {
     NOP        = 0x00,
+    RDDCOLMOD  = 0x0C,  // Read pixel format
     SWRESET    = 0x01,  // Software reset
     SLPIN      = 0x10,  // Sleep in
     SLPOUT     = 0x11,  // Sleep out
@@ -24,11 +25,26 @@ enum class ST7796Command : std::uint8_t {
 
     WRDISBV    = 0x51,  // Write display brightness
     WRCTRLD    = 0x53,  // Write control display
+
+    GSCAN      = 0x45,  // Get scanline
 };
 
+// Call after a batch of reads, before commands, data, or DMA writes.
+void reset_write_baud();
+// Write-path guard: restores speed if the explicit reset was missed.
+void ensure_write_baud();
+
+void send_command_no_cs(ST7796Command cmd);
 void send_command(ST7796Command cmd);
 void send_data(const std::uint8_t* data, std::size_t size);
 void send_data(std::initializer_list<std::uint8_t> data);
+
+uint16_t get_scanline();
+uint8_t get_pixel_format();
+void get_scanline_raw(uint8_t (&rx)[3]);
+uint16_t decode_scanline(const uint8_t (&rx)[3]);
+
+void wait_for_blanking_with_gap(uint16_t return_line);
 
 template <std::size_t N>
 void send_data(const std::uint8_t (&data)[N]) {
