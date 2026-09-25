@@ -12,8 +12,8 @@
 int spi_dma_channel;
 dma_channel_config spi_dma_config;
 
-uint8_t a_buff[BUFF_SIZE];
-uint8_t b_buff[BUFF_SIZE];
+uint16_t a_buff[BUFF_SIZE / 2];
+uint16_t b_buff[BUFF_SIZE / 2];
 
 std::atomic<bool> a_buff_written{true};
 std::atomic<bool> b_buff_written{true};
@@ -50,20 +50,21 @@ void init_dma() {
     spi_dma_channel = dma_claim_unused_channel(true);
     spi_dma_config = dma_channel_get_default_config(spi_dma_channel);
 
-    channel_config_set_transfer_data_size(&spi_dma_config, DMA_SIZE_8);
+    channel_config_set_transfer_data_size(&spi_dma_config, DMA_SIZE_16);
     channel_config_set_read_increment(&spi_dma_config, true);
     channel_config_set_write_increment(&spi_dma_config, false);
     channel_config_set_dreq(&spi_dma_config, spi_get_dreq(LCD_SPI, true));
 }
 
-void send_pixels_dma(const uint8_t* buffer, size_t bytes) {
+void send_pixels_dma(const uint16_t* buffer, size_t num_transfers) {
     ensure_write_baud();
+    ensure_spi_format(true);
     dma_channel_configure(
         spi_dma_channel,
         &spi_dma_config,
         &spi_get_hw(LCD_SPI)->dr,
         buffer,
-        bytes,
+        num_transfers,
         true
     );
 
@@ -83,39 +84,37 @@ void send_pixels_dma(const uint8_t* buffer, size_t bytes) {
 }
 
 void core1_main() {
-    uint8_t colors[8][2] = {{0xF8, 0x00}, {0x07, 0xE0}, {0x00, 0x1F}, {0xFF, 0xFF}, {0x00, 0x00}, {0xFF, 0xE0}, {0x07, 0xFF}, {0xF8, 0x1F}};
+    uint16_t colors[8] = {0xF800, 0x07E0, 0x001F, 0xFFFF, 0x0000, 0xFFE0, 0x07FF, 0xF81F};
 
     uint8_t color = 0;
     uint8_t div_num = 0;
     while (true) {
+        uint16_t (*buff)[BUFF_SIZE / 2];
+        std::atomic<bool> *buff_written;
+        uint32_t *fill_us;
         if (a_buff_written) {
-            const uint32_t fill_start = time_us_32();
-            for (int i = 0; i < BUFF_SIZE / 2; ++i) {
-                a_buff[i * 2] = colors[color][0];
-                a_buff[(i * 2) + 1] = colors[color][1];
-            }
-            a_fill_us = time_us_32() - fill_start;
-            a_buff_written = false;
-            ++div_num;
-            if (div_num == 4) {
-                div_num = 0;
-                ++color;
-                if (color == 8) color = 0;
-            }
+            buff = &a_buff;
+            buff_written = &a_buff_written;
+            fill_us = &a_fill_us;
         } else if (b_buff_written) {
-            const uint32_t fill_start = time_us_32();
-            for (int i = 0; i < BUFF_SIZE / 2; ++i) {
-                b_buff[i * 2] = colors[color][0];
-                b_buff[(i * 2) + 1] = colors[color][1];
-            }
-            b_fill_us = time_us_32() - fill_start;
-            b_buff_written = false;
-            ++div_num;
-            if (div_num == 4) {
-                div_num = 0;
-                ++color;
-                if (color == 8) color = 0;
-            }
+            buff = &b_buff;
+            buff_written = &b_buff_written;
+            fill_us = &b_fill_us;
+        } else {
+            continue;
+        }
+
+        const uint32_t fill_start = time_us_32();
+        for (int i = 0; i < BUFF_SIZE / 2; ++i) {
+            (*buff)[i] = colors[color];
+        }
+        *fill_us = time_us_32() - fill_start;
+        *buff_written = false;
+        ++div_num;
+        if (div_num == BUFF_NUM) {
+            div_num = 0;
+            ++color;
+            if (color == 8) color = 0;
         }
     }
 }
@@ -148,6 +147,7 @@ int main() {
 
     uint64_t previous_wait_start = 0;
     bool have_previous_wait = false;
+    bool next_is_a = true;
     while (true) {
         const uint64_t wait_start = time_us_64();
         const bool frame_interval_valid = have_previous_wait;
@@ -155,7 +155,7 @@ int main() {
             ? wait_start - previous_wait_start : 0;
         previous_wait_start = wait_start;
         have_previous_wait = true;
-        wait_for_blanking_with_gap(222); // read-baud swap 117-124us
+        wait_for_blanking_with_gap(257);
         const uint64_t after_wait_us = time_us_64();
         const uint64_t wait_us = after_wait_us - wait_start;
         reset_write_baud(); // write-baud swap 81-82us
@@ -164,52 +164,54 @@ int main() {
         gpio_put(PIN_DC, 1);
         gpio_put(PIN_CS, 0);
 
-        for (int o = 0; o < 4; o++) {
-            if (!a_buff_written) {
+        for (int o = 0; o < BUFF_NUM; o++) {
+            if (!a_buff_written && next_is_a) {
+                next_is_a = false;
                 const uint32_t fill_us = a_fill_us;
                 const uint64_t send_start = time_us_64();
                 const uint64_t other_us = send_start - other_start;
-                send_pixels_dma(a_buff, BUFF_SIZE);
+                send_pixels_dma(a_buff, BUFF_SIZE / 2);
                 const uint64_t send_end = time_us_64();
                 const uint64_t send_us = send_end - send_start;
                 other_start = send_end;
                 a_buff_written = true;
-//                 std::printf("buffer A strip %u: fill=%lu us core0_send=%llu us core0_other=%llu us bytes=%u\n",
-//                             static_cast<unsigned>(div_num),
-//                             static_cast<unsigned long>(fill_us),
-//                             static_cast<unsigned long long>(send_us),
-//                             static_cast<unsigned long long>(other_us),
-//                             static_cast<unsigned>(BUFF_SIZE));
+                std::printf("buffer A strip %u: fill=%lu us core0_send=%llu us core0_other=%llu us bytes=%u\n",
+                            static_cast<unsigned>(div_num),
+                            static_cast<unsigned long>(fill_us),
+                            static_cast<unsigned long long>(send_us),
+                            static_cast<unsigned long long>(other_us),
+                            static_cast<unsigned>(BUFF_SIZE));
                 ++div_num;
                 if (div_num == 4) div_num = 0;
-            } else if (!b_buff_written) {
+            } else if (!b_buff_written && !next_is_a) {
+                next_is_a = true;
                 const uint32_t fill_us = b_fill_us;
                 const uint64_t send_start = time_us_64();
                 const uint64_t other_us = send_start - other_start;
-                send_pixels_dma(b_buff, BUFF_SIZE);
+                send_pixels_dma(b_buff, BUFF_SIZE / 2);
                 const uint64_t send_end = time_us_64();
                 const uint64_t send_us = send_end - send_start;
                 other_start = send_end;
                 b_buff_written = true;
-//                 std::printf("buffer B strip %u: fill=%lu us core0_send=%llu us core0_other=%llu us bytes=%u\n",
-//                             static_cast<unsigned>(div_num),
-//                             static_cast<unsigned long>(fill_us),
-//                             static_cast<unsigned long long>(send_us),
-//                             static_cast<unsigned long long>(other_us),
-//                             static_cast<unsigned>(BUFF_SIZE));
+                std::printf("buffer B strip %u: fill=%lu us core0_send=%llu us core0_other=%llu us bytes=%u\n",
+                            static_cast<unsigned>(div_num),
+                            static_cast<unsigned long>(fill_us),
+                            static_cast<unsigned long long>(send_us),
+                            static_cast<unsigned long long>(other_us),
+                            static_cast<unsigned>(BUFF_SIZE));
                 ++div_num;
                 if (div_num == 4) div_num = 0;
             } else {
-                std::printf("ERROR: buff not ready - %u\n", buff_not_ready_count);
+//                 std::printf("ERROR: buff not ready - %u\n", buff_not_ready_count);
                 ++buff_not_ready_count;
             }
         }
         // Optional loop/wait timing; enable alongside the per-buffer logs.
-        // if (frame_interval_valid) {
-        //     std::printf("wait-start interval: %llu us; wait_for_blanking: %llu us\n",
-        //                 static_cast<unsigned long long>(frame_interval_us),
-        //                 static_cast<unsigned long long>(wait_us));
-        // }
+        if (frame_interval_valid) {
+            std::printf("wait-start interval: %llu us; wait_for_blanking: %llu us\n",
+                        static_cast<unsigned long long>(frame_interval_us),
+                        static_cast<unsigned long long>(wait_us));
+        }
     }
 
 }

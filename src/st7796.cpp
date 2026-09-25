@@ -7,6 +7,18 @@
 #define ROTATION 0
 
 uint8_t read_baud_set = 0;
+// spi_init() starts in 8-bit mode. Core 0 owns all format changes.
+static bool spi_16_bit = false;
+
+void ensure_spi_format(bool use_16_bit) {
+    if (spi_16_bit == use_16_bit) return;
+    while (spi_is_busy(LCD_SPI)) {
+        tight_loop_contents();
+    }
+    spi_set_format(LCD_SPI, use_16_bit ? 16 : 8,
+                   SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
+    spi_16_bit = use_16_bit;
+}
 
 // SPI access and this state are owned by core 0. Finish DMA before switching.
 void reset_write_baud() {
@@ -24,6 +36,8 @@ void ensure_write_baud() {
 
 // Read commands must also be sent at read speed, without the write guard.
 static void send_command_at_current_baud(ST7796Command cmd) {
+    // Leave command data and register reads in 8-bit mode too.
+    ensure_spi_format(false);
     std::uint8_t value = static_cast<std::uint8_t>(cmd);
 
     gpio_put(PIN_DC, 0);
@@ -108,19 +122,13 @@ uint16_t get_scanline() {
 
 void wait_for_blanking_with_gap(uint16_t return_line) {
     uint16_t line = get_scanline();
-    if (line < 2 || line > 199) {
-        std::printf("ERROR: first scanline=%u; expected 2-199\n",
-                    static_cast<unsigned>(line));
-    }
-    // Establish the low advancing range before accepting the threshold.
     for (;;) {
-        while (line < 2 || line > 199) line = get_scanline();
-        while (line >= 2 && line <= 224) {
-            if (line >= return_line) return;
-            line = get_scanline();
-        }
-        // If the plateau was reached before observing the threshold, retry
-        // next cycle rather than accepting a high-range reading like 257.
+        // Observe the plateau, then its transition into the high range.
+        while (line != 1) line = get_scanline();
+        while (line == 1) line = get_scanline();
+        while (line >= 257 && line < return_line) line = get_scanline();
+        if (line == return_line || line == return_line + 1) return;
+        // If polling missed the window, retry at the next plateau.
     }
 }
 
@@ -182,7 +190,7 @@ void init_display() {
 
     switch (ROTATION) {
         case 0:
-            send_data({0x88});
+            send_data({0x08}); // Was 0x88: flip row write direction so we can write behind the scanline
             break;
 
         case 90:

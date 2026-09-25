@@ -12,3 +12,5 @@
 #define SPI_READ_MHZ 10
 
 #define BUFF_SIZE 76800
+
+#define BUFF_NUM 4

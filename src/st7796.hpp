@@ -33,6 +33,8 @@ enum class ST7796Command : std::uint8_t {
 void reset_write_baud();
 // Write-path guard: restores speed if the explicit reset was missed.
 void ensure_write_baud();
+// Core 0 only; finish any DMA before switching. true = 16-bit pixels.
+void ensure_spi_format(bool use_16_bit);
 
 void send_command_no_cs(ST7796Command cmd);
 void send_command(ST7796Command cmd);
