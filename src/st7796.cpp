@@ -122,14 +122,8 @@ uint16_t get_scanline() {
 
 void wait_for_blanking_with_gap(uint16_t return_line) {
     uint16_t line = get_scanline();
-    for (;;) {
-        // Observe the plateau, then its transition into the high range.
-        while (line != 1) line = get_scanline();
-        while (line == 1) line = get_scanline();
-        while (line >= 257 && line < return_line) line = get_scanline();
-        if (line == return_line || line == return_line + 1) return;
-        // If polling missed the window, retry at the next plateau.
-    }
+    while (line != return_line && line != return_line + 1) line = get_scanline();
+    return;
 }
 
 void init_display() {
@@ -165,7 +159,7 @@ void init_display() {
 
     // Maximum vertical front/back porches for the synchronization experiment.
     send_command(static_cast<ST7796Command>(0xB5));
-    send_data({0xFF, 0xFF, 0x00, 0x04});
+    send_data({0xFF, 0x21, 0x00, 0x04});
     //          VFP   VBP   reserved HBP
 
     // Documented display-function defaults, including 480 gate lines.

@@ -2,7 +2,9 @@
 
 ## Goal
 
-This project is a challenge to achieve the highest practical frame rate with the hardware below, while keeping display updates visually coherent.
+This project explores how quickly a Raspberry Pi Pico can update a 320 × 480 SPI display without visible tearing. The current full-screen color test achieves approximately **18.70 full-screen updates per second** after reducing blanking and retuning the scanline trigger, with no visible tearing in the tested pattern.
+
+The performance summary compares the experiments; the sections that follow explain how faster transfers exposed tearing and how changing write direction and synchronization resolved it in the tested pattern.
 
 ### MCU
 
@@ -20,8 +22,38 @@ This project is a challenge to achieve the highest practical frame rate with the
 - **Interface:** SPI
 - **Touch:** Resistive touchscreen
 - **Display Controller:** ST7796S
-- **Refresh Rate:** Up to 60 Hz
+- **Refresh Rate:** Up to 60 Hz; measured ~29.3 Hz in the earlier maximum-porch experiment; not independently remeasured for the latest settings
 - **Framebuffer Storage:** On-display GRAM (Supports writing to regions not just the full screen)
+
+## Performance summary
+
+Two RAM buffers are reused alternately. Each holds 76,800 bytes: one quarter of the 320 × 480 screen in RGB565 format (two bytes per pixel). A full-screen update requires four buffer sends, not four allocated buffers. FPS here means uploaded images per second; panel refresh rate means how often the display scans its own image memory. Pixel-send times exclude synchronization waits. Estimated transfer rates below are not measured tear-free update rates; partial-screen updates are labeled separately.
+
+| Step                                                     | Actual SPI clock | Send time per buffer |                 Pixel-send time per update | Update rate / result                                                                                      |
+| -------------------------------------------------------- | ---------------: | -------------------: | -----------------------------------------: | --------------------------------------------------------------------------------------------------------- |
+| Individual two-byte pixel writes                         |    Nominal 1 MHz |         Not measured | ≥2,457.6 ms, full screen (wire-time bound) | ≤0.407 FPS theoretical; no end-to-end benchmark                                                           |
+| Two reusable buffers, blocking 8-bit SPI                 |       15.625 MHz |            46.729 ms |                    186.916 ms, full screen | ~5.35 FPS estimated, excluding overhead                                                                   |
+| DMA, requested 20 MHz                                    |       15.625 MHz |           ~46.697 ms |                   ~186.788 ms, full screen | ~5.33 FPS estimated with command/logging overhead; 0.07% shorter sends                                    |
+| DMA, requested 40 MHz                                    |        31.25 MHz |            ~23.35 ms |                     ~93.40 ms, full screen | ~10.59 FPS estimated with overhead                                                                        |
+| DMA, requested 80 MHz                                    |         62.5 MHz |           ~11.676 ms |                    ~46.704 ms, full screen | ~20.96 FPS estimated with overhead; visible tearing                                                       |
+| DMA, requested 160 MHz                                   |         62.5 MHz |            ~11.68 ms |                     ~46.72 ms, full screen | ~20.95 FPS estimated; no clock or throughput gain                                                         |
+| Scan-synchronized half-screen, 8-bit SPI                 |         62.5 MHz |           ~11.676 ms |                    ~23.352 ms, half screen | ~29.3 half-screen updates/s; no visible tearing at the tuned start point                                  |
+| 16-bit SPI + 16-bit DMA, three-buffer test               |         62.5 MHz |           ~10.755 ms |                 ~32.265 ms, three quarters | ~29.2 partial-screen updates/s (~34.21 ms loop); significant tearing before the direction/start-phase fix |
+| Reversed row order + plateau-end start, four buffers |     62.5 MHz |       ~10.755 ms |                 ~43.02 ms, full screen | ~14.55 FPS (~68.75 ms loop); no visible tearing in the full-screen color test                         |
+| **Reduced blanking + retuned scanline start, four buffers** | **62.5 MHz** | **~10.755 ms** | **~43.02 ms, full screen** | **~18.70 FPS (~53.481 ms loop); no visible tearing in the full-screen color test** |
+
+The latest full-frame loop averages **53.481 ms (~18.70 FPS)**, including approximately **43.02 ms of pixel transfers**, **9.70 ms waiting for synchronization**, and **0.76 ms of other overhead**. The earlier maximum-porch result spent approximately 24.87 ms waiting and uploaded one frame every two measured 34.17 ms panel cycles. The latest upload timing alone does not independently establish the panel refresh rate.
+
+Supporting measurements:
+
+| Measurement                               |                               Earlier result |                                              Later result |
+| ----------------------------------------- | -------------------------------------------: | --------------------------------------------------------: |
+| Buffer fill on core 1                     | ~0.81 ms per buffer in the blocking baseline |             ~0.870–0.940 ms in the latest captured full-screen run |
+| Pixel transfer throughput at 62.5 MHz SPI |               ~52.62 Mbit/s with 8-bit words |       ~57.13 Mbit/s with 16-bit words; 7.9% shorter sends |
+| SPI wire utilization                      |                      ~84.2% with 8-bit words |                                  ~91.4% with 16-bit words |
+| Switch to read baud                       |                                   117–124 µs |    Retained benchmark; not remeasured for each later step |
+| Restore write baud                        |                                     81–82 µs |    Retained benchmark; not remeasured for each later step |
+| Wait return to software write-start point |                                     83–84 µs | Retained benchmark from the synchronization investigation |
 
 ## Improving transfer performance
 
@@ -48,18 +80,9 @@ At the original SPI setting, average strip send time changed from **46.729 ms wi
 
 ### Increasing the SPI clock
 
-With the same four-strip layout and DMA pixel transfers, increasing the requested SPI clock improved measured throughput:
+Increasing the requested SPI clock improved transfer throughput until the hardware reached an actual 62.5 MHz clock. Requesting 160 MHz produced the same clock as requesting 80 MHz, so it provided no further gain. The [performance summary](#performance-summary) collects the measurements for each setting.
 
-| Requested SPI clock (`SPI_MHZ`) | Actual SPI clock | Strip send time | Estimated FPS including command/logging overhead |
-| ------------------------------- | ---------------- | --------------- | ------------------------------------------------ |
-| 20 MHz                          | 15,625,000 Hz    | 46.70 ms        | 5.33                                             |
-| 40 MHz                          | 31,250,000 Hz    | 23.35 ms        | 10.59                                            |
-| 80 MHz                          | 62,500,000 Hz    | 11.68 ms        | 20.96                                            |
-| 160 MHz                         | 62,500,000 Hz    | 11.68 ms        | 20.95                                            |
-
-Requesting 80 MHz achieved an actual SPI clock of 62.5 MHz. Raising the request to 160 MHz produced the same actual clock and no further throughput improvement. Compared with the 20 MHz request, estimated frame rate increased from about 5.33 to 21 FPS (approximately 3.9×).
-
-These FPS figures estimate full-screen transfer throughput from four strip sends plus measured command/logging overhead. They do not measure the panel refresh rate or establish tear-free output.
+Across the tested settings, estimated full-screen throughput rose from about 5.33 to 21 FPS. These estimates include command/logging overhead but not scan synchronization. Faster transfers alone did not establish tear-free output.
 
 ## Tearing investigation
 
@@ -71,7 +94,7 @@ Slow-motion viewing showed that boundary moving through the screen, with pixels 
 
 ### Establishing a scanline timing reference
 
-The board's normal connector did not appear to expose the controller's TE output, so we investigated the Get Scanline command (`GSCAN`, `0x45`) over SPI. The display is wired separately to match `src/config.hpp`, with MISO on GPIO 16.
+The board's normal connector did not appear to expose the controller's tearing-effect (TE) synchronization output, so we investigated the Get Scanline command (`GSCAN`, `0x45`) over SPI. The display is wired separately to match `src/config.hpp`, with MISO on GPIO 16.
 
 We inspected the raw response bytes in hexadecimal and binary. The current experimental decoder treats the capture as one dummy bit, sixteen data bits, and seven trailing bits:
 
@@ -81,7 +104,7 @@ scanline = (captured_24_bits >> 7) & 0xFFFF;
 
 A separate fixed-register test read pixel format `0x55` correctly 1,000 times with no mismatches, supporting basic readback reliability. An independent [TFT_eSPI investigation](https://github.com/Bodmer/TFT_eSPI/issues/731) also found SPI scanline-read behavior that differed from the datasheet; its extra command clock and trailing dummy-byte sequence remain useful leads.
 
-To give pixel transfers more time, we unlocked command set 2 and increased both vertical front and back porches to `0xFF` (255), their documented maximum. Unlocking the extended registers initially left the screen black, so we needed to return the initialization settings to documented defaults before continuing the porch experiments.
+To extend the non-visible intervals around the panel scan (the vertical front and back porches), we unlocked command set 2 and increased both vertical front and back porches to `0xFF` (255), their documented maximum. Unlocking the extended registers initially left the screen black, so we needed to return the initialization settings to documented defaults before continuing the porch experiments.
 
 With the extended porches, analysis of 32,911 consecutive `GSCAN` samples found this repeating pattern:
 
@@ -89,14 +112,14 @@ With the extended porches, analysis of 32,911 consecutive `GSCAN` samples found 
 0 … 224 → sustained 1s → 257 … 511 → wrap to low values
 ```
 
-Across 115 sustained runs of `1`, the last sampled value before the plateau was 219–224 and the first afterward was 257–262, with some values skipped by polling. Timestamped captures in `scanline_timing_log.txt` then established the timing:
+Across 115 sustained runs of `1`, the last sampled value before the plateau was 219–224 and the first afterward was 257–262, with some values skipped by polling. A local timestamped capture (`scanline_timing_log.txt`, not committed to the repository) then established the timing:
 
-| Measurement | Result |
-| --- | ---: |
-| Cycles analyzed without large capture gaps | 172 |
-| Median cycle period | 34.166 ms (~29.27 Hz) |
-| Median plateau exit to next plateau entry | 16.686 ms |
-| Typical sustained `1` interval | ~17.46 ms |
+| Measurement                                |                Result |
+| ------------------------------------------ | --------------------: |
+| Cycles analyzed without large capture gaps |                   172 |
+| Median cycle period                        | 34.166 ms (~29.27 Hz) |
+| Median plateau exit to next plateau entry  |             16.686 ms |
+| Typical sustained `1` interval             |             ~17.46 ms |
 
 We have not investigated enough to predict the plateau duration from the controller settings, explain the gap between 224 and 257, or explain why readings now reach 511. The number of repeated `1` samples also depends on polling speed. For now, this is a measured timing reference rather than a complete model of physical scan position or vertical blanking.
 
@@ -114,52 +137,74 @@ Synchronizing updates to a repeatable point in the `GSCAN` cycle made the tear a
 
 Simply accepting a reading of `1` was insufficient because it could occur late in the plateau. We instead tested delays relative to the plateau's end, increasing the delay by 1 ms every three seconds. **17–19 ms showed no visible tearing in the tested half-screen region**. Around 20 ms, the boundary reappeared at the bottom and moved upward again. The timestamped logs place that successful range approximately 0.4–2.4 ms into the next plateau.
 
-Combining those observations with the baud-switch and write-start measurements let us calculate an earlier scanline trigger. We swept the threshold upward from 200 and empirically verified **222** as the working return point for the tested half-screen updates. The current `wait_for_blanking_with_gap(222)` first establishes the advancing low range, then returns when it reaches or crosses the threshold. This replaced the arbitrary delay with a starting point derived from measurements and checked on the display.
+Combining those observations with the baud-switch and write-start measurements let us calculate an earlier scanline trigger. We swept the threshold upward from 200 and empirically verified **222** as the working return point for the tested half-screen updates. That version of `wait_for_blanking_with_gap(222)` first established the advancing low range, then returned when it reached or crossed the threshold. This replaced the arbitrary delay with a starting point derived from measurements and checked on the display.
 
-The consistent tear location and its predictable movement with delay strongly support a timing conflict between GRAM writes and panel scanning as the cause. Synchronization solved that conflict for the tested update size; increasing the amount of data eventually exceeded the available time.
+The consistent tear location and its predictable movement with delay strongly support a timing conflict between GRAM writes and panel scanning as the cause. The two-buffer test worked at this start point, but adding a third produced visible tearing. Fitting transfers into a measured refresh period was not sufficient; their timing relative to the scan and their write direction also mattered.
 
 A separate transaction issue also surfaced during testing: reading `GSCAN` between pixel buffers interrupted the active `RAMWR` stream. Consecutive buffers must remain in the same pixel-write transaction, with readback afterward. Issuing a new `RAMWR` restarts at the beginning of the configured address window.
 
-## Results and current limits
+## Full-screen tearing fix
 
-The successful result was **~29.3 half-screen updates per second**, synchronized once per measured panel cycle. The SPI bandwidth explains why half-screen was the largest tested working size using whole quarter-screen buffers:
+We fixed the visible tearing in the full-screen color test by reversing the pixel row-address interpretation and changing when writes begin. The active `MADCTL` setting changed from `0x88` to `0x08`, reversing the vertical write direction while keeping the refresh-direction bits unchanged. This is a row-order flip, rather than a full 180-degree rotation of both image axes.
 
-| Pixel payload | Transfer time at 62.5 MHz actual SPI |
+In the initial full-screen fix, we used the end of the repeated `1` readings as the write-start reference, which we interpret as the beginning of the next scan. `wait_for_blanking_with_gap(257)` observes that plateau and returns on **257 or 258**; if polling misses the window, it retries at the next plateau. All four quarter-screen buffer sends then stream through one uninterrupted `RAMWR` transaction.
+
+The working timing model is that writes begin **behind the current scanline**. The panel reads the old image before those rows are replaced. Writing then finishes **ahead of the next refresh's scanline**, allowing that scan to read the new image. The requirement is to update each row between its old-image and new-image reads, rather than to fit the entire transfer inside blanking or one refresh period. The observed result is **no visible tearing in the tested full-screen pattern**; the detailed mapping from GSCAN values to physical rows remains unverified.
+
+That configuration uploaded **one full frame every two panel refreshes**. Although the update rate is lower than the earlier half-screen experiment, the complete image without a visible tear looks much better to the user.
+
+### Pixel transfer implementation
+
+We changed pixel transfers from **8-bit SPI frames and 8-bit DMA transfers to 16-bit SPI frames and 16-bit DMA transfers** to improve transfer speed. At the same actual 62.5 MHz SPI clock, this reduced the measured time per quarter-screen buffer from **11.676 ms to approximately 10.755 ms**, a **7.9% reduction**. Each transfer now carries one native RGB565 pixel with MSB-first transmission; the total number of pixel bits sent is unchanged. Commands and register reads use 8-bit frames. A shared format flag avoids reconfiguring SPI when its width is already correct. Measured timings and comparisons are collected in the [performance summary](#performance-summary).
+
+The synchronization wait aligns the next write with the chosen phase; removing it can bring tearing back. The earlier half-screen result was a successful configuration, not a hardware limit on tear-free image size. The full-screen result depends on both the new write direction and the new start phase.
+
+### Optimizing one upload every two refreshes
+
+A full 320 × 480 RGB565 image contains 2,457,600 bits. At the current actual SPI clock of 62.5 MHz, transmitting those bits takes **at least 39.322 ms**, even with no gaps or software overhead. Our measured full-frame pixel transfer is approximately **43.02 ms**.
+
+The measured panel refresh period is approximately **34.17 ms even with the vertical front and back porches set to their maximum values**. At this SPI clock and full-frame payload, we therefore cannot upload a new image every panel refresh through timing or software optimization alone. Slowing the screen's internal clock could make each refresh long enough; alternatively, increasing the actual transfer bandwidth or sending less pixel data would change the constraint.
+
+Instead, we kept the screen clock and established a tear-free full-frame update every **two refreshes**, initially taking approximately **68.75 ms (14.55 FPS)** per upload.
+
+### Reducing blanking and retuning the scanline trigger
+
+When I made the blanking area smaller, its reported position in the sequence of scanline values changed. The old plateau-exit trigger around 257 no longer matched the new sequence. I adjusted the synchronization point for that change and continued tweaking the porch settings and scanline trigger until I had just about the smallest blanking period I could achieve while maintaining **no visible tears in the full-screen color test**.
+
+The current source uses porch parameters `0xFF, 0x21, 0x00, 0x04` for command `0xB5` and `wait_for_blanking_with_gap(35)`, which polls for 35 or 36. Pixel transfers still use four quarter-screen sends with 16-bit SPI and DMA at an actual 62.5 MHz.
+
+The latest capture gives these results:
+
+| Measurement | Result |
 | --- | ---: |
-| Quarter screen, 76,800 bytes | 11.676 ms |
-| Half screen | 23.352 ms, plus gaps |
-| Three quarters | 35.028 ms, plus gaps |
-| Full screen, 307,200 bytes | 46.704 ms, plus gaps |
+| Wait-start intervals | 53,510 / 53,408 / 53,524 µs |
+| Average full-frame interval | **53,480.7 µs (53.481 ms)** |
+| Full-screen upload rate | **18.70 FPS** |
+| Pixel send per strip | 10,754–10,756 µs |
+| Pixel sends per full frame | ~43.02 ms |
+| Synchronization wait | 9,625–9,749 µs; ~9.70 ms average |
+| Other loop overhead (by subtraction) | ~0.76 ms |
+| Buffer fill on core 1 | 870–940 µs per strip, overlapping transfers |
 
-Two buffers fit within the **34.166 ms refresh cycle** and worked without visible tearing at the tuned starting point. A third buffer already exceeds that cycle before command or software overhead. Synchronization chooses when the writes begin; it cannot make SPI deliver them faster.
+The frame rate is calculated as `1,000,000 / mean(wait-start interval)`, using the three captured intervals. This is approximately **28.5% faster** than the earlier 14.55 FPS result, with essentially unchanged pixel transfer time. The gain comes from reducing time outside the pixel transfers, primarily the synchronization wait. These measurements describe upload cadence, not the blanking duration itself or an independent measurement of the panel refresh rate.
 
-Half-screen is not an exact 50% hardware limit. Smaller increments could explore the remaining margin: the measured transfer rate could carry roughly **73% of a screen per cycle** before overhead. Fitting the bytes into a cycle is necessary for sustained full updates each refresh, but avoiding tearing also requires the writes not to cross the panel's scan through the updated region.
+### Why synchronization still leaves about 10 ms idle
 
-### Current source and retained benchmarks
+The working diagnosis is that repeating the same blanking interval on every refresh accounts for most of the remaining synchronization wait, despite tuning the current fixed-porch setup close to its tear-free limit. The safe write-start point appears to have only about two scanlines of margin after blanking ends. That narrow margin describes where an upload can start, not how long the previous upload must wait for that point to return.
 
-**The current source attempts four quarter-buffer sends after each wait**, retaining the full-screen bandwidth experiment. This differs from the successful half-screen test and is not a claim of tear-free full-screen output. Repeated writes beginning at the start of a full-screen window update the same region unless the address window or write position is deliberately advanced.
+In this model, the first blanking interval provides the timing margin needed to write behind one scan and finish ahead of the next. Fixed porch settings repeat that allowance during the second refresh as well, even though the writer may no longer need the same amount of blanking at that phase. Shortening both intervals together removes the first interval's needed margin and brings tearing back. The hypothesis is that this repeated allowance explains the vast majority of the remaining idle time, rather than slow software between transfers. It is not yet established that all of the second interval is unnecessary: it may also prevent the next scan from catching unfinished writes.
 
-The buffers are reused as core 1 refills them. A-first selection can reorder ready buffers, and a loop iteration with neither buffer ready sends nothing. Enforcing producer order and counting completed sends remain necessary before treating this as a reliable arbitrary-frame renderer.
+The measured **9.70 ms wait is not a direct measurement of blanking duration**. Assuming the upload still spans two refreshes, the 53.481 ms upload interval implies a panel period of about 26.740 ms. Two such periods, minus 43.02 ms of transfers and about 0.76 ms of other overhead, leave approximately 9.70 ms waiting for the next safe start. Measuring the scan and blanking phases under these settings is needed to confirm the diagnosis.
 
-Per-buffer fill/send/other timings and optional loop/wait timings remain available, with their print statements commented out. `core0_other` includes synchronization waiting, not just command/logging overhead. Wait-start intervals measure loop cadence and represent panel cadence only when the loop synchronizes once per refresh. Legacy capture loops have been removed, and raw serial captures are ignored by default.
+It is worth exploring whether controller commands can **adjust blanking live**, giving the first refresh more blanking and the second none, or the minimum the controller permits. If those changes can take effect at the intended boundaries without disturbing the scan, this could preserve the first refresh's timing margin while removing much of the repeated allowance. Sending the extra control commands will probably take substantially less time than the roughly 10 ms currently spent waiting, so command overhead alone is unlikely to erase the potential gain.
 
-## Next performance experiments
+This remains an experiment, not a confirmed controller capability or speedup. We need to establish when porch changes take effect, whether alternating them is stable, and how to send the commands while preserving pixel-write position. The existing investigation showed that intervening commands can interrupt the `RAMWR` stream, so the implementation must account for resuming the remaining pixels as well as the command and baud-switch costs. Success should be measured by a shorter complete upload interval with no visible tearing.
 
-### Send pixels as 16-bit SPI words
+### Current source and remaining validation
 
-At the actual **62.5 MHz SPI clock**, the theoretical maximum is **62.5 Mbit/s (7.8125 MB/s)** with no gaps. Sending 76,800 bytes in 11.676 ms currently achieves approximately **52.62 Mbit/s (6.58 MB/s)** during pixel transfers—**84.2% utilization**. About **15.8% of the measured transfer time** is therefore beyond the ideal wire time, leaving room to investigate gaps between SPI words and other transfer overhead. This excludes the additional time spent waiting for synchronization between updates.
+The current configuration uses `BUFF_NUM = 4` and `wait_for_blanking_with_gap(35)`. Core 0 alternates buffers across updates. Core 1 still selects free buffers A-first, and a loop iteration with neither expected buffer ready sends nothing. Strict producer ordering and counting completed sends remain necessary before treating this as a reliable arbitrary-frame renderer. Moving, detailed imagery should also be tested beyond the solid-color pattern.
 
-The current DMA and SPI path sends 8-bit words. Test **16-bit SPI words with 16-bit DMA transfers** for pixel payloads, returning to 8-bit transactions for commands and register reads. Keep the pixel bit count unchanged and preserve high-byte-first wire order; blindly reinterpreting the existing byte array as little-endian `uint16_t` values would swap the bytes. DMA transfer counts must become pixel/word counts rather than byte counts.
-
-The goal is fewer gaps between words and less FIFO/DMA work per pixel; the transmitted bit count stays the same. Even perfect efficiency at the current clock gives a **39.322 ms** full-frame wire time, still longer than the current refresh cycle. This optimization therefore needs measurement and may need to be combined with slower panel refresh. PIO-generated SPI is another option for reducing inter-word gaps.
-
-### Slow the panel's internal clock from /1 to /2
-
-`B1` currently uses `{A0, 10}`. Its DIVA field selects the internal-clock divider; `{A1, 10}` selects **/2 instead of /1**. If measured timings scale accordingly, the cycle would increase from ~34.2 to **~68.3 ms**, lowering refresh from ~29.3 to **~14.6 Hz**.
-
-That would provide enough total cycle time for a **~46.7 ms full-screen transfer**, making one complete uploaded frame per slower refresh feasible on bandwidth grounds. It trades temporal smoothness for the possibility of better visual continuity: a coherent full-screen image rather than partial-screen updates spread over refreshes.
-
-This is not an automatic tearing fix. The estimated long interval would only increase from ~17.5 to **~34.9 ms**, still shorter than a full transfer, so writing across the scan cycle would need correct scheduling. The divider also slows visible scanning; it does not exclusively extend blanking. Re-measure the scanline sequence and retune the threshold after changing it.
+Per-buffer fill/send/other timings and optional loop/wait timings remain available. `core0_other` includes synchronization waiting, not just command/logging overhead. Wait-start intervals measure update-loop cadence, currently approximately 53.481 ms per full-screen upload in the supplied capture. Raw serial captures are ignored by default.
 
 ## References
 

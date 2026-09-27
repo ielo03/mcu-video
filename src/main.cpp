@@ -145,6 +145,10 @@ int main() {
     gpio_put(PIN_DC, 1);
     gpio_put(PIN_CS, 0);
 
+    // while (true) {
+    //     std::printf("%llu scanline: %u\n", time_us_64(), get_scanline());
+    // }
+
     uint64_t previous_wait_start = 0;
     bool have_previous_wait = false;
     bool next_is_a = true;
@@ -155,7 +159,7 @@ int main() {
             ? wait_start - previous_wait_start : 0;
         previous_wait_start = wait_start;
         have_previous_wait = true;
-        wait_for_blanking_with_gap(257);
+        wait_for_blanking_with_gap(35);
         const uint64_t after_wait_us = time_us_64();
         const uint64_t wait_us = after_wait_us - wait_start;
         reset_write_baud(); // write-baud swap 81-82us
